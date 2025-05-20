@@ -1,0 +1,4 @@
+[ZoneTransfer]
+ZoneId=3
+ReferrerUrl=https://github.com/sql-js/sql.js/releases/tag/v1.13.0
+HostUrl=https://objects.githubusercontent.com/github-production-release-asset-2e65be/3556910/1121486d-6563-4104-95bf-669b92840db6?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=releaseassetproduction%2F20250519%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20250519T221247Z&X-Amz-Expires=300&X-Amz-Signature=4218eb1a3b8aa2d03222516e60b3e962a420fbbbf701858eb0d70e8426ca5211&X-Amz-SignedHeaders=host&response-content-disposition=attachment%3B%20filename%3Dsql.js&response-content-type=application%2Foctet-stream
