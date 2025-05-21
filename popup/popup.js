@@ -1,10 +1,7 @@
 console.log("🚀 popup.js loaded");
 
-// UI elements
-const addBtn = document.getElementById("add");
-const listBtn = document.getElementById("list");
+// UI elements - ONLY include elements that exist in the HTML
 const listLikersBtn = document.getElementById("list-likers");
-const exportBtn = document.getElementById("export");
 const pickMutualBtn = document.getElementById("pick-mutual");
 const autoScrapeToggle = document.getElementById("auto-scrape-toggle");
 const toggleLabel = document.querySelector(".toggle-label");
@@ -29,40 +26,6 @@ autoScrapeToggle.addEventListener("change", () => {
     if (isEnabled === undefined) {
       chrome.storage.local.set({ autoScrapeEnabled: false });
     }
-  });
-});
-
-// Insert manually
-addBtn.addEventListener("click", () => {
-  const username = prompt("Add follower handle:");
-  if (!username) return;
-  chrome.runtime.sendMessage({
-    type: "INSERT_FOLLOWER",
-    payload: { handle: username.startsWith("@") ? username : "@" + username }
-  });
-  log(`Added: ${username}`);
-});
-
-// List all
-listBtn.addEventListener("click", () => {
-  chrome.runtime.sendMessage({ type: "GET_ALL_FOLLOWERS" }, (followers) => {
-    if (!followers) return log("⚠️ Failed to fetch");
-    log(`📋 All followers (${followers.length}):\n${followers.join("\n")}`);
-  });
-});
-
-// Export to .txt file
-exportBtn.addEventListener("click", () => {
-  chrome.runtime.sendMessage({ type: "GET_ALL_FOLLOWERS" }, (followers) => {
-    if (!followers || followers.length === 0) return log("⚠️ No followers to export.");
-    const blob = new Blob([followers.join("\n")], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "followers.txt";
-    a.click();
-    URL.revokeObjectURL(url);
-    log(`📤 Exported ${followers.length} followers to followers.txt`);
   });
 });
 
@@ -93,7 +56,7 @@ pickMutualBtn.addEventListener("click", () => {
   });
 });
 
-// Update the List Likers button and functionality
+// List Likers button functionality
 listLikersBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "GET_LIKERS" }, (likers) => {
     if (!likers) return log("⚠️ Failed to fetch likers.");
@@ -106,7 +69,7 @@ listLikersBtn.addEventListener("click", () => {
   });
 });
 
-// Update the Pick Random Mutual button with count when popup opens
+// Update the button counts when popup opens
 function updateLikersCount() {
   chrome.runtime.sendMessage({ type: "GET_LIKERS" }, (likers) => {
     if (likers && likers.length > 0) {
@@ -114,22 +77,6 @@ function updateLikersCount() {
       listLikersBtn.innerText = `List Likers (${likers.length})`;
       pickMutualBtn.innerText = `🎯 Pick Random Mutual (${likers.length})`;
     }
-  });
-}
-
-// Update the Pick Random Mutual button with count when popup opens
-function updateMutualsCount() {
-  chrome.runtime.sendMessage({ type: "GET_LIKERS" }, (likers) => {
-    if (!likers || likers.length === 0) return;
-    
-    chrome.runtime.sendMessage({ type: "GET_ALL_FOLLOWERS" }, (followers) => {
-      if (!followers) return;
-      
-      const mutuals = likers.filter(liker => followers.includes(liker));
-      if (mutuals.length > 0) {
-        pickMutualBtn.innerText = `🎯 Pick Random Mutual (${mutuals.length})`;
-      }
-    });
   });
 }
 

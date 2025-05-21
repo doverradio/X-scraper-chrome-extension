@@ -71,13 +71,25 @@ function addScrapeButton() {
 
   const btn = document.createElement("button");
   btn.id = "x-scrape-btn";
-  btn.innerText = "Scrape Likers";
+  
+  // Check if we're on a /likes page
+  const isLikesPage = window.location.href.endsWith("/likes");
+  
+  // Set button text and color based on the current page
+  if (isLikesPage) {
+    btn.innerText = "Begin Scrape";
+    btn.style.background = "#17bf63"; // Green color for begin scrape
+  } else {
+    btn.innerText = "Scrape Likers";
+    btn.style.background = "#1d9bf0"; // Blue color for regular state
+  }
+  
+  // Style the button
   btn.style.position = "fixed";
   btn.style.top = "80px";
   btn.style.right = "20px";
   btn.style.zIndex = "9999";
   btn.style.padding = "10px 15px";
-  btn.style.background = "#1d9bf0";
   btn.style.color = "#fff";
   btn.style.border = "none";
   btn.style.borderRadius = "5px";
@@ -92,7 +104,7 @@ function addScrapeButton() {
         // We'll handle the scraping after page loads
         return;
       }
-      alert("Navigate to your tweet's /likes URL first, then click 'Scrape Likers'.");
+      alert("Navigate to your tweet's /likes URL first, then click 'Begin Scrape'.");
       return;
     }
 
@@ -123,16 +135,23 @@ function addScrapeButton() {
             }
           );
         });
-        alert(`Scraped ${mutuals.length} mutuals (liked + follow you). Check console.`);
+        alert(`Scraped ${mutuals.length} likers. Check console.`);
       } catch (e) {
-        console.error("❌ Failed to send mutuals to background:", e);
+        console.error("❌ Failed to send likers to background:", e);
         alert("Error saving likers. Check console for details.");
       }
     } catch (error) {
       console.error("Error during scraping:", error);
       alert("Error during scraping. Check console for details.");
     } finally {
-      btn.innerText = "Scrape Likers";
+      // Reset button text based on current page
+      if (window.location.href.endsWith("/likes")) {
+        btn.innerText = "Begin Scrape";
+        btn.style.background = "#17bf63";
+      } else {
+        btn.innerText = "Scrape Likers";
+        btn.style.background = "#1d9bf0";
+      }
       btn.disabled = false;
     }
   };
@@ -277,8 +296,45 @@ async function autoScrollLikesPage() {
   });
 }
 
-async function autoScrollFollowersPage() {
+// Update for better span handling in content.js
+function safelyProcessUserCells(rows) {
   const usernames = new Set();
+  
+  if (!rows || !rows.length) return usernames;
+  
+  rows.forEach(row => {
+    try {
+      // Safely get all spans
+      const spans = row.querySelectorAll('span');
+      if (!spans || spans.length === 0) return;
+      
+      // Convert to array safely with null/undefined checks
+      const spansArray = Array.from(spans || []);
+      
+      // Find handle with better error checking
+      const handleSpan = spansArray.find(span => {
+        if (!span) return false;
+        const text = span.textContent;
+        return text && typeof text === 'string' && text.trim().startsWith('@');
+      });
+      
+      if (handleSpan && handleSpan.textContent) {
+        const handle = handleSpan.textContent.trim();
+        if (handle) {
+          usernames.add(handle);
+        }
+      }
+    } catch (error) {
+      console.error("Error processing row:", error);
+    }
+  });
+  
+  return usernames;
+}
+
+// Updated function to use the safer processing
+async function autoScrollFollowersPage() {
+  let allUsernames = new Set();
   let lastCount = 0;
   let stablePasses = 0;
   let totalScrolls = 0;
@@ -294,41 +350,46 @@ async function autoScrollFollowersPage() {
     const interval = setInterval(() => {
       // Try multiple scroll methods
       window.scrollTo(0, document.body.scrollHeight);
-      scrollContainer.scrollTo(0, scrollContainer.scrollHeight);
+      if (scrollContainer) {
+        scrollContainer.scrollTo(0, scrollContainer.scrollHeight);
+      }
       
-      const rows = document.querySelectorAll('div[data-testid="UserCell"]');
-      console.log(`Found ${rows.length} user cells, currently have ${usernames.size} usernames`);
-
-      rows.forEach(row => {
-        const spans = row.querySelectorAll('span');
-        const handleSpan = Array.from(spans).find(span => span.textContent?.trim().startsWith("@"));
-        if (handleSpan) {
-          const handle = handleSpan.textContent.trim();
-          usernames.add(handle);
+      try {
+        // Safely get and process user cells
+        const rows = document.querySelectorAll('div[data-testid="UserCell"]');
+        const newUsernames = safelyProcessUserCells(rows);
+        
+        // Add all new usernames to our main set
+        newUsernames.forEach(name => allUsernames.add(name));
+        
+        console.log(`Found ${rows.length} user cells, currently have ${allUsernames.size} usernames`);
+        
+        // Scroll the last row into view
+        if (rows.length > 0) {
+          const lastRow = rows[rows.length - 1];
+          if (lastRow) {
+            lastRow.scrollIntoView({ behavior: "smooth", block: "end" });
+          }
         }
-      });
-
-      // Also scroll the last row into view
-      const lastRow = rows[rows.length - 1];
-      if (lastRow) {
-        lastRow.scrollIntoView({ behavior: "smooth", block: "end" });
+      } catch (error) {
+        console.error("Error during scroll processing:", error);
       }
       
       totalScrolls++;
 
-      if (usernames.size === lastCount) {
+      if (allUsernames.size === lastCount) {
         stablePasses++;
         console.log(`No new users found (${stablePasses}/5)`);
       } else {
         stablePasses = 0;
-        lastCount = usernames.size;
-        console.log(`Found ${usernames.size} users so far`);
+        lastCount = allUsernames.size;
+        console.log(`Found ${allUsernames.size} users so far`);
       }
 
       if (stablePasses >= 5 || totalScrolls >= 50) {
         clearInterval(interval);
         console.log(`✅ Finished scrolling followers after ${totalScrolls} scrolls`);
-        resolve(Array.from(usernames));
+        resolve(Array.from(allUsernames));
       }
     }, 1000);
   });
