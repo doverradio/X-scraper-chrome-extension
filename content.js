@@ -1,3 +1,31 @@
+// Variable to store the auto-scrape setting
+let autoScrapeEnabled = false; // Default to disabled for safety
+
+// Load the setting when content script initializes
+function loadAutoScrapeSettings() {
+  try {
+    chrome.storage.local.get("autoScrapeEnabled", (result) => {
+      // Update our global variable
+      autoScrapeEnabled = result.autoScrapeEnabled !== undefined ? result.autoScrapeEnabled : false;
+      console.log("🔄 Auto-scraping setting loaded:", autoScrapeEnabled);
+    });
+  } catch (error) {
+    console.error("Error loading auto-scrape settings:", error);
+    autoScrapeEnabled = false; // Default to disabled on error
+  }
+}
+
+// Load settings immediately and also set up a listener for changes
+loadAutoScrapeSettings();
+
+// Listen for changes to the auto-scrape setting
+chrome.storage.onChanged.addListener((changes, namespace) => {
+  if (namespace === 'local' && changes.autoScrapeEnabled) {
+    autoScrapeEnabled = changes.autoScrapeEnabled.newValue;
+    console.log("🔄 Auto-scraping setting updated:", autoScrapeEnabled);
+  }
+});
+
 // ✅ Inject follower sniffer into the page's real JS context
 const script = document.createElement("script");
 script.src = chrome.runtime.getURL("inject-sniffer.js");
@@ -18,6 +46,26 @@ window.addEventListener("message", (event) => {
   }
 });
 
+// ✅ Automatically redirect /status/... to /likes - BUT ONLY when scrape button is clicked!
+let redirected = false;
+let manuallyTriggeredRedirect = false;
+
+// This function will only be called when the scrape button is clicked
+const triggerRedirectToLikes = () => {
+  if (redirected) return;
+  
+  const tweetUrlMatch = window.location.pathname.match(/^\/[^/]+\/status\/\d+$/);
+  if (tweetUrlMatch && !window.location.pathname.endsWith("/likes")) {
+    redirected = true;
+    manuallyTriggeredRedirect = true;
+    const likesUrl = window.location.pathname + "/likes";
+    console.log("➡️ Manually redirecting to:", likesUrl);
+    window.location.href = likesUrl;
+    return true;
+  }
+  return false;
+}
+
 function addScrapeButton() {
   if (document.getElementById("x-scrape-btn")) return;
 
@@ -36,26 +84,57 @@ function addScrapeButton() {
   btn.style.cursor = "pointer";
 
   btn.onclick = async () => {
+    // Check if we're already on a /likes page
     if (!window.location.href.endsWith("/likes")) {
+      // Not on likes page, so redirect first
+      const redirected = triggerRedirectToLikes();
+      if (redirected) {
+        // We'll handle the scraping after page loads
+        return;
+      }
       alert("Navigate to your tweet's /likes URL first, then click 'Scrape Likers'.");
       return;
     }
 
-    console.log("Scraping likers from /likes view...");
-    await autoScrollLikesPage();
+    console.log("🔄 Starting to scrape likers from /likes view...");
+    btn.innerText = "Scrolling...";
+    btn.disabled = true;
+    
+    try {
+      // Now autoScrollLikesPage returns the mutual handles directly
+      const mutuals = await autoScrollLikesPage();
+      console.log("✅ Finished scrolling, collected mutuals:", mutuals);
+      window.likers = mutuals;
 
-    const usernames = Array.from(document.querySelectorAll('div[dir="ltr"] > span'))
-      .map(el => el.textContent)
-      .filter(username => username.startsWith("@"));
-
-    console.log("Scraped usernames:", usernames);
-    window.likers = usernames; // store for mutual comparison
-    chrome.runtime.sendMessage({
-        type: "SET_LIKERS",
-        payload: { likers: usernames }
-    });
-
-    alert(`Scraped ${usernames.length} likers. Check console.`);
+      try {
+        await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage(
+            {
+              type: "SET_LIKERS",
+              payload: { likers: mutuals }
+            },
+            (response) => {
+              if (chrome.runtime.lastError) {
+                console.error("❌ Runtime error:", chrome.runtime.lastError.message);
+                reject(chrome.runtime.lastError);
+              } else {
+                resolve(response);
+              }
+            }
+          );
+        });
+        alert(`Scraped ${mutuals.length} mutuals (liked + follow you). Check console.`);
+      } catch (e) {
+        console.error("❌ Failed to send mutuals to background:", e);
+        alert("Error saving likers. Check console for details.");
+      }
+    } catch (error) {
+      console.error("Error during scraping:", error);
+      alert("Error during scraping. Check console for details.");
+    } finally {
+      btn.innerText = "Scrape Likers";
+      btn.disabled = false;
+    }
   };
 
   document.body.appendChild(btn);
@@ -85,29 +164,116 @@ function addScrapeFollowersButton() {
     }
 
     console.log("Scrolling and scraping followers...");
-    const followers = await autoScrollFollowersPage();
-
-    console.log("Scraped followers:", followers);
-    window.myFollowers = followers;
-    alert(`Scraped ${followers.length} followers. Check console.`);
+    btn.innerText = "Scrolling...";
+    btn.disabled = true;
+    
+    try {
+      const followers = await autoScrollFollowersPage();
+      console.log("Scraped followers:", followers);
+      window.myFollowers = followers;
+      alert(`Scraped ${followers.length} followers. Check console.`);
+    } finally {
+      btn.innerText = "Scrape Followers";
+      btn.disabled = false;
+    }
   };
 
   document.body.appendChild(btn);
 }
 
 async function autoScrollLikesPage() {
-  return new Promise(resolve => {
-    const scrollContainer = document.querySelector('main');
-    let lastHeight = 0;
+  // Find the correct scrollable element - try multiple options
+  let scrollContainer = document.querySelector('[data-testid="primaryColumn"]');
+  if (!scrollContainer) scrollContainer = document.querySelector('main');
+  if (!scrollContainer) scrollContainer = document.documentElement;
+  
+  console.log("📜 Using scroll container:", scrollContainer);
+  
+  let lastHeight = scrollContainer.scrollHeight;
+  let lastUserCount = 0;
+  let unchangedPasses = 0;
+  let totalScrolls = 0;
+  let pauseCount = 0;
+  
+  // Keep track of mutuals while scrolling
+  const mutualHandles = new Set();
+
+  return new Promise((resolve, reject) => {
     const interval = setInterval(() => {
+      // Collect current mutuals
+      const likerCards = document.querySelectorAll('[data-testid="UserCell"]');
+      
+      likerCards.forEach(card => {
+        // Check if this user follows you
+        const followsYou = card.querySelector('[data-testid="userFollowIndicator"]');
+        if (!followsYou) return;
+        
+        // Find the handle
+        const spans = card.querySelectorAll('span');
+        const handleSpan = Array.from(spans).find(span => 
+          span.textContent && span.textContent.trim().startsWith("@")
+        );
+        
+        if (handleSpan) {
+          const handle = handleSpan.textContent.trim();
+          mutualHandles.add(handle);
+        }
+      });
+      
+      console.log(`Found ${mutualHandles.size} mutual followers so far`);
+      
+      // Scroll down using multiple methods
+      window.scrollTo(0, document.body.scrollHeight);
+      scrollContainer.scrollTo(0, scrollContainer.scrollHeight);
       scrollContainer.scrollBy(0, 1000);
+      
+      totalScrolls++;
+      
+      // Check if we've reached the bottom or if content is still loading
       const currentHeight = scrollContainer.scrollHeight;
-      if (currentHeight === lastHeight) {
-        clearInterval(interval);
-        resolve();
+      const currentUserCount = mutualHandles.size;
+      
+      console.log(`Scroll attempt ${totalScrolls}, height: ${currentHeight}px, mutuals: ${currentUserCount}`);
+
+      if (currentHeight === lastHeight && currentUserCount === lastUserCount) {
+        unchangedPasses++;
+        console.log(`No new content detected (${unchangedPasses}/6)`);
+        
+        // Every 3 unchanged passes, let's pause a bit longer to make sure content loads
+        if (unchangedPasses % 3 === 0 && pauseCount < 3) {
+          pauseCount++;
+          console.log(`Adding extra pause (${pauseCount}/3) to ensure content loads...`);
+          
+          // Jiggle the scroll a bit to trigger loading
+          setTimeout(() => {
+            scrollContainer.scrollBy(0, -100);
+            setTimeout(() => {
+              scrollContainer.scrollBy(0, 200);
+            }, 500);
+          }, 500);
+        }
+      } else {
+        unchangedPasses = 0;
+        if (currentHeight !== lastHeight) {
+          console.log(`Height changed: ${lastHeight}px → ${currentHeight}px`);
+          lastHeight = currentHeight;
+        }
+        if (currentUserCount !== lastUserCount) {
+          console.log(`Mutual count changed: ${lastUserCount} → ${currentUserCount}`);
+          lastUserCount = currentUserCount;
+        }
       }
-      lastHeight = currentHeight;
-    }, 250);
+
+      // Stop conditions:
+      // 1. 6 consecutive passes with no change (increased from 5)
+      // 2. OR if we've done 75 scroll attempts total (increased from 50)
+      // 3. AND we've found at least some followers
+      if ((unchangedPasses >= 6 || totalScrolls >= 75) && mutualHandles.size > 0) {
+        clearInterval(interval);
+        console.log(`✅ Finished scrolling likes list after ${totalScrolls} scrolls. Found ${mutualHandles.size} mutual followers.`);
+        resolve(Array.from(mutualHandles));
+      }
+    }, 1500); // Increased from 1000ms to 1500ms to give more time to load
   });
 }
 
@@ -115,47 +281,68 @@ async function autoScrollFollowersPage() {
   const usernames = new Set();
   let lastCount = 0;
   let stablePasses = 0;
+  let totalScrolls = 0;
+  
+  // Find the correct scrollable element
+  let scrollContainer = document.querySelector('[data-testid="primaryColumn"]');
+  if (!scrollContainer) scrollContainer = document.querySelector('main');
+  if (!scrollContainer) scrollContainer = document.documentElement;
+  
+  console.log("📜 Using scroll container for followers:", scrollContainer);
 
   return new Promise(resolve => {
     const interval = setInterval(() => {
+      // Try multiple scroll methods
+      window.scrollTo(0, document.body.scrollHeight);
+      scrollContainer.scrollTo(0, scrollContainer.scrollHeight);
+      
       const rows = document.querySelectorAll('div[data-testid="UserCell"]');
+      console.log(`Found ${rows.length} user cells, currently have ${usernames.size} usernames`);
 
       rows.forEach(row => {
-        const handleSpan = row.querySelector('span');
+        const spans = row.querySelectorAll('span');
+        const handleSpan = Array.from(spans).find(span => span.textContent?.trim().startsWith("@"));
         if (handleSpan) {
           const handle = handleSpan.textContent.trim();
-          if (handle.startsWith("@")) {
-            usernames.add(handle);
-          }
+          usernames.add(handle);
         }
       });
 
+      // Also scroll the last row into view
       const lastRow = rows[rows.length - 1];
       if (lastRow) {
         lastRow.scrollIntoView({ behavior: "smooth", block: "end" });
       }
+      
+      totalScrolls++;
 
       if (usernames.size === lastCount) {
         stablePasses++;
+        console.log(`No new users found (${stablePasses}/5)`);
       } else {
         stablePasses = 0;
         lastCount = usernames.size;
+        console.log(`Found ${usernames.size} users so far`);
       }
 
-      if (stablePasses >= 5) {
+      if (stablePasses >= 5 || totalScrolls >= 50) {
         clearInterval(interval);
+        console.log(`✅ Finished scrolling followers after ${totalScrolls} scrolls`);
         resolve(Array.from(usernames));
       }
-    }, 800);
+    }, 1000);
   });
 }
 
 let scrapeButtonInjected = false;
 
+// Set up a mutation observer to watch for page changes and add our buttons
 const observer = new MutationObserver(() => {
   const isTweetPage = window.location.href.includes("/status/");
   const isFollowersPage = window.location.href.endsWith("/followers");
+  const isLikesPage = window.location.href.endsWith("/likes");
 
+  // Add appropriate buttons based on the page type
   if (isTweetPage && !scrapeButtonInjected) {
     addScrapeButton();
     scrapeButtonInjected = true;
@@ -164,9 +351,32 @@ const observer = new MutationObserver(() => {
   if (isFollowersPage && !document.getElementById("x-follower-btn")) {
     addScrapeFollowersButton();
   }
+
+  // If we just got redirected to the likes page and it was a manual redirect,
+  // automatically click the scrape button
+  if (isLikesPage && manuallyTriggeredRedirect) {
+    manuallyTriggeredRedirect = false; // Reset the flag
+    
+    // Small delay to ensure the page is fully loaded
+    setTimeout(() => {
+      const scrapeBtn = document.getElementById("x-scrape-btn");
+      if (scrapeBtn) {
+        console.log("🔄 Auto-clicking Scrape Likers button after manual redirect");
+        scrapeBtn.click();
+      }
+    }, 1000);
+  }
 });
 
 observer.observe(document.body, {
   childList: true,
   subtree: true,
+});
+
+// Add some helpful logging
+console.log("✅ X-Scraper content script loaded", {
+  url: window.location.href,
+  isTweetPage: window.location.href.includes("/status/"),
+  isFollowersPage: window.location.href.endsWith("/followers"),
+  isLikesPage: window.location.href.endsWith("/likes")
 });
