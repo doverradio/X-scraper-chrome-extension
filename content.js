@@ -297,37 +297,113 @@ async function autoScrollLikesPage() {
 }
 
 // Update for better span handling in content.js
+// Update for better span handling in content.js
+// Final ultra-robust version of safelyProcessUserCells
 function safelyProcessUserCells(rows) {
+  // Create a set to store usernames
   const usernames = new Set();
   
-  if (!rows || !rows.length) return usernames;
-  
-  rows.forEach(row => {
-    try {
-      // Safely get all spans
-      const spans = row.querySelectorAll('span');
-      if (!spans || spans.length === 0) return;
-      
-      // Convert to array safely with null/undefined checks
-      const spansArray = Array.from(spans || []);
-      
-      // Find handle with better error checking
-      const handleSpan = spansArray.find(span => {
-        if (!span) return false;
-        const text = span.textContent;
-        return text && typeof text === 'string' && text.trim().startsWith('@');
-      });
-      
-      if (handleSpan && handleSpan.textContent) {
-        const handle = handleSpan.textContent.trim();
-        if (handle) {
-          usernames.add(handle);
-        }
-      }
-    } catch (error) {
-      console.error("Error processing row:", error);
+  try {
+    // Early return if rows is invalid
+    if (!rows) {
+      console.log("No rows provided");
+      return usernames;
     }
-  });
+    
+    // Check if rows has a length property and it's a number
+    if (typeof rows.length !== 'number') {
+      console.log("Rows doesn't have a valid length property");
+      return usernames;
+    }
+    
+    // Check if rows is empty
+    if (rows.length === 0) {
+      console.log("Empty rows collection");
+      return usernames;
+    }
+    
+    // Loop through rows using index-based iteration (safer than for...of)
+    let i = 0;
+    const rowsLength = rows.length;
+    
+    while (i < rowsLength) {
+      try {
+        // Get the current row
+        const row = rows[i];
+        
+        // Skip if row is invalid
+        if (!row) {
+          console.log(`Row at index ${i} is invalid`);
+          i++;
+          continue;
+        }
+        
+        // Safely get spans
+        let spans = null;
+        try {
+          // Check if querySelectorAll is available on this object
+          if (typeof row.querySelectorAll !== 'function') {
+            console.log(`Row at index ${i} doesn't have querySelectorAll method`);
+            i++;
+            continue;
+          }
+          
+          spans = row.querySelectorAll('span');
+        } catch (spanError) {
+          console.log(`Error getting spans from row ${i}:`, spanError);
+          i++;
+          continue;
+        }
+        
+        // Check if spans is valid
+        if (!spans || typeof spans.length !== 'number') {
+          console.log(`Invalid spans collection at row ${i}`);
+          i++;
+          continue;
+        }
+        
+        // Process each span individually
+        let j = 0;
+        const spansLength = spans.length;
+        
+        while (j < spansLength) {
+          try {
+            const span = spans[j];
+            
+            // Skip invalid spans
+            if (!span) {
+              j++;
+              continue;
+            }
+            
+            // Check for textContent property
+            if (!span.textContent) {
+              j++;
+              continue;
+            }
+            
+            const text = span.textContent;
+            
+            // Verify it's a string and starts with @
+            if (typeof text === 'string' && text.trim().startsWith('@')) {
+              const handle = text.trim();
+              usernames.add(handle);
+            }
+          } catch (spanProcessError) {
+            console.log(`Error processing span ${j} in row ${i}:`, spanProcessError);
+          }
+          
+          j++;
+        }
+      } catch (rowError) {
+        console.log(`Error processing row at index ${i}:`, rowError);
+      }
+      
+      i++;
+    }
+  } catch (globalError) {
+    console.error("Global error in safelyProcessUserCells:", globalError);
+  }
   
   return usernames;
 }
