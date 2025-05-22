@@ -46,20 +46,18 @@ window.addEventListener("message", (event) => {
   }
 });
 
-// ✅ Automatically redirect /status/... to /likes - BUT ONLY when scrape button is clicked!
+// ✅ Redirect logic - only for moving from tweet to /likes
 let redirected = false;
-let manuallyTriggeredRedirect = false;
 
-// This function will only be called when the scrape button is clicked
+// This function will only be called when we need to redirect to /likes
 const triggerRedirectToLikes = () => {
-  if (redirected) return;
+  if (redirected) return false;
   
   const tweetUrlMatch = window.location.pathname.match(/^\/[^/]+\/status\/\d+$/);
   if (tweetUrlMatch && !window.location.pathname.endsWith("/likes")) {
     redirected = true;
-    manuallyTriggeredRedirect = true;
     const likesUrl = window.location.pathname + "/likes";
-    console.log("➡️ Manually redirecting to:", likesUrl);
+    console.log("➡️ Redirecting to likes page:", likesUrl);
     window.location.href = likesUrl;
     return true;
   }
@@ -96,104 +94,100 @@ function addScrapeButton() {
   btn.style.cursor = "pointer";
 
   btn.onclick = async () => {
-    // Check if we're already on a /likes page
-    if (!window.location.href.endsWith("/likes")) {
-      // Not on likes page, so redirect first
-      const redirected = triggerRedirectToLikes();
-      if (redirected) {
-        // We'll handle the scraping after page loads
-        return;
-      }
-      alert("Navigate to your tweet's /likes URL first, then click 'Begin Scrape'.");
-      return;
-    }
-
-    console.log("🔄 Starting to scrape likers from /likes view...");
-    btn.innerText = "Scrolling...";
-    btn.disabled = true;
+    const currentUrl = window.location.href;
+    console.log("🔘 Button clicked on URL:", currentUrl);
     
-    try {
-      // Now autoScrollLikesPage returns the mutual handles directly
-      const mutuals = await autoScrollLikesPage();
-      console.log("✅ Finished scrolling, collected mutuals:", mutuals);
-      window.likers = mutuals;
-
+    // Check if we're already on a /likes page
+    if (currentUrl.endsWith("/likes")) {
+      // We're on the likes page, start scraping immediately
+      console.log("🔄 Starting to scrape likers from /likes view...");
+      btn.innerText = "Scrolling...";
+      btn.disabled = true;
+      
       try {
-        await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage(
-            {
-              type: "SET_LIKERS",
-              payload: { likers: mutuals }
-            },
-            (response) => {
-              if (chrome.runtime.lastError) {
-                console.error("❌ Runtime error:", chrome.runtime.lastError.message);
-                reject(chrome.runtime.lastError);
-              } else {
-                resolve(response);
-              }
+        // Now autoScrollLikesPage returns both mutuals and all likers
+        const scrapedData = await autoScrollLikesPage();
+        console.log("✅ Finished scrolling, collected data:", scrapedData);
+        
+        // Store both sets of data globally for backup
+        window.mutualLikers = scrapedData.mutuals;
+        window.allLikers = scrapedData.allLikers;
+
+        // Check if extension context is available
+        console.log("🔍 Checking extension context...");
+        if (!chrome.runtime || !chrome.runtime.id) {
+          console.error("❌ Extension context is not available");
+          alert(`Scraped ${scrapedData.mutuals.length} mutual likers and ${scrapedData.allLikers.length} total likers, but cannot save to extension. Data is available in console as window.mutualLikers and window.allLikers.`);
+          return;
+        }
+
+        console.log("📤 Attempting to send data to background script...");
+        
+        // Simple timeout-based approach instead of complex retry logic
+        const sendDataWithTimeout = () => {
+          return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+              reject(new Error("Timeout after 10 seconds"));
+            }, 10000);
+            
+            try {
+              chrome.runtime.sendMessage(
+                {
+                  type: "SET_LIKERS",
+                  payload: { 
+                    mutuals: scrapedData.mutuals,
+                    allLikers: scrapedData.allLikers
+                  }
+                },
+                (response) => {
+                  clearTimeout(timeoutId);
+                  
+                  if (chrome.runtime.lastError) {
+                    console.error("❌ Runtime error:", chrome.runtime.lastError.message);
+                    reject(new Error(chrome.runtime.lastError.message));
+                  } else {
+                    console.log("✅ Successfully sent data to background");
+                    resolve(response);
+                  }
+                }
+              );
+            } catch (error) {
+              clearTimeout(timeoutId);
+              reject(error);
             }
-          );
-        });
-        alert(`Scraped ${mutuals.length} likers. Check console.`);
-      } catch (e) {
-        console.error("❌ Failed to send likers to background:", e);
-        alert("Error saving likers. Check console for details.");
-      }
-    } catch (error) {
-      console.error("Error during scraping:", error);
-      alert("Error during scraping. Check console for details.");
-    } finally {
-      // Reset button text based on current page
-      if (window.location.href.endsWith("/likes")) {
+          });
+        };
+        
+        try {
+          await sendDataWithTimeout();
+          alert(`✅ Success! Scraped ${scrapedData.mutuals.length} mutual likers and ${scrapedData.allLikers.length} total likers.`);
+        } catch (error) {
+          console.error("❌ Failed to send data:", error);
+          alert(`⚠️ Scraped ${scrapedData.mutuals.length} mutual likers and ${scrapedData.allLikers.length} total likers, but failed to save. Data is available in console as window.mutualLikers and window.allLikers.\n\nError: ${error.message}`);
+        }
+        
+      } catch (error) {
+        console.error("❌ Error during scraping:", error);
+        alert("Error during scraping. Check console for details.");
+      } finally {
+        // Reset button text - we know we're on a likes page
         btn.innerText = "Begin Scrape";
         btn.style.background = "#17bf63";
-      } else {
-        btn.innerText = "Scrape Likers";
-        btn.style.background = "#1d9bf0";
+        btn.disabled = false;
       }
-      btn.disabled = false;
-    }
-  };
-
-  document.body.appendChild(btn);
-}
-
-function addScrapeFollowersButton() {
-  if (document.getElementById("x-follower-btn")) return;
-
-  const btn = document.createElement("button");
-  btn.id = "x-follower-btn";
-  btn.innerText = "Scrape Followers";
-  btn.style.position = "fixed";
-  btn.style.top = "130px";
-  btn.style.right = "20px";
-  btn.style.zIndex = "9999";
-  btn.style.padding = "10px 15px";
-  btn.style.background = "#17bf63";
-  btn.style.color = "#fff";
-  btn.style.border = "none";
-  btn.style.borderRadius = "5px";
-  btn.style.cursor = "pointer";
-
-  btn.onclick = async () => {
-    if (!window.location.href.endsWith("/followers")) {
-      alert("Navigate to your /followers page first, then click 'Scrape Followers'.");
-      return;
-    }
-
-    console.log("Scrolling and scraping followers...");
-    btn.innerText = "Scrolling...";
-    btn.disabled = true;
-    
-    try {
-      const followers = await autoScrollFollowersPage();
-      console.log("Scraped followers:", followers);
-      window.myFollowers = followers;
-      alert(`Scraped ${followers.length} followers. Check console.`);
-    } finally {
-      btn.innerText = "Scrape Followers";
-      btn.disabled = false;
+      
+    } else {
+      // We're NOT on a likes page, so redirect first
+      console.log("🔄 Not on likes page, redirecting...");
+      const wasRedirected = triggerRedirectToLikes();
+      if (wasRedirected) {
+        // Successfully triggered redirect, the page will reload
+        return;
+      } else {
+        // Couldn't redirect for some reason
+        alert("Unable to redirect to likes page. Please navigate to the tweet's /likes URL manually and try again.");
+        return;
+      }
     }
   };
 
@@ -214,20 +208,17 @@ async function autoScrollLikesPage() {
   let totalScrolls = 0;
   let pauseCount = 0;
   
-  // Keep track of mutuals while scrolling
+  // Keep track of mutuals AND all likers while scrolling
   const mutualHandles = new Set();
+  const allLikerHandles = new Set();
 
   return new Promise((resolve, reject) => {
     const interval = setInterval(() => {
-      // Collect current mutuals
+      // Collect current likers
       const likerCards = document.querySelectorAll('[data-testid="UserCell"]');
       
       likerCards.forEach(card => {
-        // Check if this user follows you
-        const followsYou = card.querySelector('[data-testid="userFollowIndicator"]');
-        if (!followsYou) return;
-        
-        // Find the handle
+        // Find the handle first
         const spans = card.querySelectorAll('span');
         const handleSpan = Array.from(spans).find(span => 
           span.textContent && span.textContent.trim().startsWith("@")
@@ -235,11 +226,19 @@ async function autoScrollLikesPage() {
         
         if (handleSpan) {
           const handle = handleSpan.textContent.trim();
-          mutualHandles.add(handle);
+          
+          // Add to all likers regardless
+          allLikerHandles.add(handle);
+          
+          // Check if this user follows you (for mutuals)
+          const followsYou = card.querySelector('[data-testid="userFollowIndicator"]');
+          if (followsYou) {
+            mutualHandles.add(handle);
+          }
         }
       });
       
-      console.log(`Found ${mutualHandles.size} mutual followers so far`);
+      console.log(`Found ${mutualHandles.size} mutual followers and ${allLikerHandles.size} total likers so far`);
       
       // Scroll down using multiple methods
       window.scrollTo(0, document.body.scrollHeight);
@@ -250,9 +249,9 @@ async function autoScrollLikesPage() {
       
       // Check if we've reached the bottom or if content is still loading
       const currentHeight = scrollContainer.scrollHeight;
-      const currentUserCount = mutualHandles.size;
+      const currentUserCount = allLikerHandles.size; // Use all likers for progress tracking
       
-      console.log(`Scroll attempt ${totalScrolls}, height: ${currentHeight}px, mutuals: ${currentUserCount}`);
+      console.log(`Scroll attempt ${totalScrolls}, height: ${currentHeight}px, total likers: ${currentUserCount}`);
 
       if (currentHeight === lastHeight && currentUserCount === lastUserCount) {
         unchangedPasses++;
@@ -278,196 +277,23 @@ async function autoScrollLikesPage() {
           lastHeight = currentHeight;
         }
         if (currentUserCount !== lastUserCount) {
-          console.log(`Mutual count changed: ${lastUserCount} → ${currentUserCount}`);
+          console.log(`Total liker count changed: ${lastUserCount} → ${currentUserCount}`);
           lastUserCount = currentUserCount;
         }
       }
 
-      // Stop conditions:
-      // 1. 6 consecutive passes with no change (increased from 5)
-      // 2. OR if we've done 75 scroll attempts total (increased from 50)
-      // 3. AND we've found at least some followers
-      if ((unchangedPasses >= 6 || totalScrolls >= 75) && mutualHandles.size > 0) {
+      // Stop conditions
+      if ((unchangedPasses >= 6 || totalScrolls >= 75) && allLikerHandles.size > 0) {
         clearInterval(interval);
-        console.log(`✅ Finished scrolling likes list after ${totalScrolls} scrolls. Found ${mutualHandles.size} mutual followers.`);
-        resolve(Array.from(mutualHandles));
+        console.log(`✅ Finished scrolling likes list after ${totalScrolls} scrolls. Found ${mutualHandles.size} mutual followers and ${allLikerHandles.size} total likers.`);
+        
+        // Return both sets of data
+        resolve({
+          mutuals: Array.from(mutualHandles),
+          allLikers: Array.from(allLikerHandles)
+        });
       }
-    }, 1500); // Increased from 1000ms to 1500ms to give more time to load
-  });
-}
-
-// Update for better span handling in content.js
-// Update for better span handling in content.js
-// Final ultra-robust version of safelyProcessUserCells
-function safelyProcessUserCells(rows) {
-  // Create a set to store usernames
-  const usernames = new Set();
-  
-  try {
-    // Early return if rows is invalid
-    if (!rows) {
-      console.log("No rows provided");
-      return usernames;
-    }
-    
-    // Check if rows has a length property and it's a number
-    if (typeof rows.length !== 'number') {
-      console.log("Rows doesn't have a valid length property");
-      return usernames;
-    }
-    
-    // Check if rows is empty
-    if (rows.length === 0) {
-      console.log("Empty rows collection");
-      return usernames;
-    }
-    
-    // Loop through rows using index-based iteration (safer than for...of)
-    let i = 0;
-    const rowsLength = rows.length;
-    
-    while (i < rowsLength) {
-      try {
-        // Get the current row
-        const row = rows[i];
-        
-        // Skip if row is invalid
-        if (!row) {
-          console.log(`Row at index ${i} is invalid`);
-          i++;
-          continue;
-        }
-        
-        // Safely get spans
-        let spans = null;
-        try {
-          // Check if querySelectorAll is available on this object
-          if (typeof row.querySelectorAll !== 'function') {
-            console.log(`Row at index ${i} doesn't have querySelectorAll method`);
-            i++;
-            continue;
-          }
-          
-          spans = row.querySelectorAll('span');
-        } catch (spanError) {
-          console.log(`Error getting spans from row ${i}:`, spanError);
-          i++;
-          continue;
-        }
-        
-        // Check if spans is valid
-        if (!spans || typeof spans.length !== 'number') {
-          console.log(`Invalid spans collection at row ${i}`);
-          i++;
-          continue;
-        }
-        
-        // Process each span individually
-        let j = 0;
-        const spansLength = spans.length;
-        
-        while (j < spansLength) {
-          try {
-            const span = spans[j];
-            
-            // Skip invalid spans
-            if (!span) {
-              j++;
-              continue;
-            }
-            
-            // Check for textContent property
-            if (!span.textContent) {
-              j++;
-              continue;
-            }
-            
-            const text = span.textContent;
-            
-            // Verify it's a string and starts with @
-            if (typeof text === 'string' && text.trim().startsWith('@')) {
-              const handle = text.trim();
-              usernames.add(handle);
-            }
-          } catch (spanProcessError) {
-            console.log(`Error processing span ${j} in row ${i}:`, spanProcessError);
-          }
-          
-          j++;
-        }
-      } catch (rowError) {
-        console.log(`Error processing row at index ${i}:`, rowError);
-      }
-      
-      i++;
-    }
-  } catch (globalError) {
-    console.error("Global error in safelyProcessUserCells:", globalError);
-  }
-  
-  return usernames;
-}
-
-// Updated function to use the safer processing
-async function autoScrollFollowersPage() {
-  let allUsernames = new Set();
-  let lastCount = 0;
-  let stablePasses = 0;
-  let totalScrolls = 0;
-  
-  // Find the correct scrollable element
-  let scrollContainer = document.querySelector('[data-testid="primaryColumn"]');
-  if (!scrollContainer) scrollContainer = document.querySelector('main');
-  if (!scrollContainer) scrollContainer = document.documentElement;
-  
-  console.log("📜 Using scroll container for followers:", scrollContainer);
-
-  return new Promise(resolve => {
-    const interval = setInterval(() => {
-      // Try multiple scroll methods
-      window.scrollTo(0, document.body.scrollHeight);
-      if (scrollContainer) {
-        scrollContainer.scrollTo(0, scrollContainer.scrollHeight);
-      }
-      
-      try {
-        // Safely get and process user cells
-        const rows = document.querySelectorAll('div[data-testid="UserCell"]');
-        const newUsernames = safelyProcessUserCells(rows);
-        
-        // Add all new usernames to our main set
-        newUsernames.forEach(name => allUsernames.add(name));
-        
-        console.log(`Found ${rows.length} user cells, currently have ${allUsernames.size} usernames`);
-        
-        // Scroll the last row into view
-        if (rows.length > 0) {
-          const lastRow = rows[rows.length - 1];
-          if (lastRow) {
-            lastRow.scrollIntoView({ behavior: "smooth", block: "end" });
-          }
-        }
-      } catch (error) {
-        console.error("Error during scroll processing:", error);
-      }
-      
-      totalScrolls++;
-
-      if (allUsernames.size === lastCount) {
-        stablePasses++;
-        console.log(`No new users found (${stablePasses}/5)`);
-      } else {
-        stablePasses = 0;
-        lastCount = allUsernames.size;
-        console.log(`Found ${allUsernames.size} users so far`);
-      }
-
-      if (stablePasses >= 5 || totalScrolls >= 50) {
-        clearInterval(interval);
-        console.log(`✅ Finished scrolling followers after ${totalScrolls} scrolls`);
-        resolve(Array.from(allUsernames));
-      }
-    }, 1000);
+    }, 1500);
   });
 }
 
@@ -476,32 +302,16 @@ let scrapeButtonInjected = false;
 // Set up a mutation observer to watch for page changes and add our buttons
 const observer = new MutationObserver(() => {
   const isTweetPage = window.location.href.includes("/status/");
-  const isFollowersPage = window.location.href.endsWith("/followers");
-  const isLikesPage = window.location.href.endsWith("/likes");
+
+  // Reset button injection flag when navigating away from tweet pages
+  if (!isTweetPage) {
+    scrapeButtonInjected = false;
+  }
 
   // Add appropriate buttons based on the page type
   if (isTweetPage && !scrapeButtonInjected) {
     addScrapeButton();
     scrapeButtonInjected = true;
-  }
-
-  if (isFollowersPage && !document.getElementById("x-follower-btn")) {
-    addScrapeFollowersButton();
-  }
-
-  // If we just got redirected to the likes page and it was a manual redirect,
-  // automatically click the scrape button
-  if (isLikesPage && manuallyTriggeredRedirect) {
-    manuallyTriggeredRedirect = false; // Reset the flag
-    
-    // Small delay to ensure the page is fully loaded
-    setTimeout(() => {
-      const scrapeBtn = document.getElementById("x-scrape-btn");
-      if (scrapeBtn) {
-        console.log("🔄 Auto-clicking Scrape Likers button after manual redirect");
-        scrapeBtn.click();
-      }
-    }, 1000);
   }
 });
 
@@ -514,6 +324,5 @@ observer.observe(document.body, {
 console.log("✅ X-Scraper content script loaded", {
   url: window.location.href,
   isTweetPage: window.location.href.includes("/status/"),
-  isFollowersPage: window.location.href.endsWith("/followers"),
   isLikesPage: window.location.href.endsWith("/likes")
 });
