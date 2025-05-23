@@ -105,25 +105,32 @@ function addScrapeButton() {
       btn.disabled = true;
       
       try {
-        // Now autoScrollLikesPage returns both mutuals and all likers
+        // Get the scraped data
         const scrapedData = await autoScrollLikesPage();
         console.log("✅ Finished scrolling, collected data:", scrapedData);
         
-        // Store both sets of data globally for backup
-        window.mutualLikers = scrapedData.mutuals;
-        window.allLikers = scrapedData.allLikers;
+        // Calculate the correct totals
+        const mutuals = scrapedData.mutuals;
+        const allLikers = scrapedData.allLikers;
+        const totalCount = mutuals.length + allLikers.length;
+        
+        console.log(`📊 Final counts: ${mutuals.length} mutuals + ${allLikers.length} non-mutuals = ${totalCount} total`);
+        
+        // Store data globally for backup
+        window.mutualLikers = mutuals;
+        window.allLikers = allLikers;
 
         // Check if extension context is available
         console.log("🔍 Checking extension context...");
         if (!chrome.runtime || !chrome.runtime.id) {
           console.error("❌ Extension context is not available");
-          alert(`Scraped ${scrapedData.mutuals.length} mutual likers and ${scrapedData.allLikers.length} total likers, but cannot save to extension. Data is available in console as window.mutualLikers and window.allLikers.`);
+          alert(`Scraped ${mutuals.length} mutual likers and ${totalCount} total likers, but cannot save to extension. Data is available in console as window.mutualLikers and window.allLikers.`);
           return;
         }
 
         console.log("📤 Attempting to send data to background script...");
         
-        // Simple timeout-based approach instead of complex retry logic
+        // Simple timeout-based approach
         const sendDataWithTimeout = () => {
           return new Promise((resolve, reject) => {
             const timeoutId = setTimeout(() => {
@@ -135,8 +142,9 @@ function addScrapeButton() {
                 {
                   type: "SET_LIKERS",
                   payload: { 
-                    mutuals: scrapedData.mutuals,
-                    allLikers: scrapedData.allLikers
+                    mutuals: mutuals,        // People who follow you
+                    allLikers: allLikers,    // People who don't follow you
+                    totalLikers: [...mutuals, ...allLikers]  // Combined list of all likers
                   }
                 },
                 (response) => {
@@ -160,10 +168,11 @@ function addScrapeButton() {
         
         try {
           await sendDataWithTimeout();
-          alert(`✅ Success! Scraped ${scrapedData.mutuals.length} mutual likers and ${scrapedData.allLikers.length} total likers.`);
+          // Show the correct total in alert
+          alert(`✅ Success! Scraped ${mutuals.length} follower likers and ${allLikers.length} non-follower likers (${totalCount} total).`);
         } catch (error) {
           console.error("❌ Failed to send data:", error);
-          alert(`⚠️ Scraped ${scrapedData.mutuals.length} mutual likers and ${scrapedData.allLikers.length} total likers, but failed to save. Data is available in console as window.mutualLikers and window.allLikers.\n\nError: ${error.message}`);
+          alert(`⚠️ Scraped ${mutuals.length} mutual likers and ${totalCount} total likers, but failed to save. Data is available in console as window.mutualLikers and window.allLikers.\n\nError: ${error.message}`);
         }
         
       } catch (error) {
@@ -208,9 +217,9 @@ async function autoScrollLikesPage() {
   let totalScrolls = 0;
   let pauseCount = 0;
   
-  // Keep track of mutuals AND all likers while scrolling
-  const mutualHandles = new Set();
-  const allLikerHandles = new Set();
+  // Keep track of mutuals and non-mutuals separately 
+  const mutualHandles = new Set();      // People who liked AND follow you
+  const nonMutualHandles = new Set();   // People who liked but DON'T follow you
 
   return new Promise((resolve, reject) => {
     const interval = setInterval(() => {
@@ -227,18 +236,19 @@ async function autoScrollLikesPage() {
         if (handleSpan) {
           const handle = handleSpan.textContent.trim();
           
-          // Add to all likers regardless
-          allLikerHandles.add(handle);
-          
           // Check if this user follows you (for mutuals)
           const followsYou = card.querySelector('[data-testid="userFollowIndicator"]');
           if (followsYou) {
             mutualHandles.add(handle);
+          } else {
+            // Add to non-mutuals if they don't follow you
+            nonMutualHandles.add(handle);
           }
         }
       });
       
-      console.log(`Found ${mutualHandles.size} mutual followers and ${allLikerHandles.size} total likers so far`);
+      const totalFound = mutualHandles.size + nonMutualHandles.size;
+      console.log(`Found ${mutualHandles.size} mutual followers and ${totalFound} total likers so far (${nonMutualHandles.size} non-mutuals)`);
       
       // Scroll down using multiple methods
       window.scrollTo(0, document.body.scrollHeight);
@@ -249,7 +259,7 @@ async function autoScrollLikesPage() {
       
       // Check if we've reached the bottom or if content is still loading
       const currentHeight = scrollContainer.scrollHeight;
-      const currentUserCount = allLikerHandles.size; // Use all likers for progress tracking
+      const currentUserCount = totalFound; // Use total for progress tracking
       
       console.log(`Scroll attempt ${totalScrolls}, height: ${currentHeight}px, total likers: ${currentUserCount}`);
 
@@ -283,14 +293,16 @@ async function autoScrollLikesPage() {
       }
 
       // Stop conditions
-      if ((unchangedPasses >= 6 || totalScrolls >= 75) && allLikerHandles.size > 0) {
+      if ((unchangedPasses >= 6 || totalScrolls >= 75) && totalFound > 0) {
         clearInterval(interval);
-        console.log(`✅ Finished scrolling likes list after ${totalScrolls} scrolls. Found ${mutualHandles.size} mutual followers and ${allLikerHandles.size} total likers.`);
         
-        // Return both sets of data
+        const finalTotal = mutualHandles.size + nonMutualHandles.size;
+        console.log(`✅ Finished scrolling likes list after ${totalScrolls} scrolls. Found ${mutualHandles.size} mutual followers and ${finalTotal} total likers (${nonMutualHandles.size} non-mutuals).`);
+        
+        // Return the data in the format your working background.js expects
         resolve({
-          mutuals: Array.from(mutualHandles),
-          allLikers: Array.from(allLikerHandles)
+          mutuals: Array.from(mutualHandles),      // People who liked AND follow you  
+          allLikers: Array.from(nonMutualHandles)  // People who liked but DON'T follow you (for your working background.js)
         });
       }
     }, 1500);
